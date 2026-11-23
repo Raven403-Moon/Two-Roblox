@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Two-Roblox Rust Automated Build and Packaging Script
 
