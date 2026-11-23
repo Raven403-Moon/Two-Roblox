@@ -12,7 +12,7 @@ use crate::crypto_store::{Account, AccountStore, ConfigStore};
 use crate::multi_instance::{is_admin, restart_as_admin, InstanceInfo, MultiInstanceManager};
 use crate::roblox_api::RobloxAPI;
 use crate::updater::RobloxUpdater;
-use crate::web_login::WebLoginManager;
+use crate::web_login::EmbeddedWebLogin;
 
 // 테마 색상 팔레트 (Python 현대적 Black, White, Blue 테마와 100% 일치)
 const COLOR_BG_MAIN: Color32 = Color32::from_rgb(9, 10, 13);
@@ -37,8 +37,9 @@ const COLOR_TEXT_SUBTLE: Color32 = Color32::from_rgb(100, 116, 139);
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Tab {
     Accounts = 0,
-    Monitor = 1,
-    Settings = 2,
+    WebLogin = 1,
+    Monitor = 2,
+    Settings = 3,
 }
 
 pub enum AppEvent {
@@ -115,6 +116,9 @@ pub struct RobloxLauncherApp {
 
     modal: Option<Modal>,
 
+    embedded_web_login: Option<EmbeddedWebLogin>,
+    web_login_group: String,
+
     event_tx: Sender<AppEvent>,
     event_rx: Receiver<AppEvent>,
     last_poll: Instant,
@@ -181,6 +185,8 @@ impl RobloxLauncherApp {
             launch_mode: LaunchMode::SelectedAccounts,
             launch_menu_open: false,
             modal: None,
+            embedded_web_login: None,
+            web_login_group: "기본".to_string(),
             event_tx: tx,
             event_rx: rx,
             last_poll: Instant::now(),
@@ -648,20 +654,31 @@ impl RobloxLauncherApp {
 }
 
 impl eframe::App for RobloxLauncherApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.poll_events();
 
         // 1. 보안 보관함 잠금 해제 화면 (언락 전)
         if !self.unlocked {
+            if let Some(ref wl) = self.embedded_web_login {
+                wl.set_visible(false);
+            }
             self.render_unlock_view(ctx);
             return;
+        }
+
+        // 웹뷰 가시성 제어: WebLogin 탭이고 모달이 열려있지 않을 때만 가시화
+        let web_active = self.current_tab == Tab::WebLogin && self.modal.is_none();
+        if !web_active {
+            if let Some(ref wl) = self.embedded_web_login {
+                wl.set_visible(false);
+            }
         }
 
         // 2. 메인 UI 화면 (사이드바 + 상단 헤더 + 하단 런처 바 + 중앙 콘텐츠)
         self.render_sidebar(ctx);
         self.render_header(ctx);
         self.render_bottom_bar(ctx);
-        self.render_content(ctx);
+        self.render_content(ctx, frame);
 
         // 3. 모달 오버레이 다이얼로그 렌더링
         self.render_modals(ctx);
@@ -807,6 +824,7 @@ impl RobloxLauncherApp {
 
                 let nav_items = [
                     ("계정 목록", Tab::Accounts),
+                    ("웹 로그인", Tab::WebLogin),
                     ("실행 모니터", Tab::Monitor),
                     ("설정 및 업데이트", Tab::Settings),
                 ];
@@ -904,6 +922,7 @@ impl RobloxLauncherApp {
 
                     let title = match self.current_tab {
                         Tab::Accounts => "계정 목록",
+                        Tab::WebLogin => "웹 로그인 (2FA / 캡차)",
                         Tab::Monitor => "실행 모니터",
                         Tab::Settings => "설정 및 업데이트",
                     };
@@ -1089,14 +1108,118 @@ impl RobloxLauncherApp {
             });
     }
 
-    fn render_content(&mut self, ctx: &egui::Context) {
+    fn render_content(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(COLOR_BG_MAIN).inner_margin(20.0))
             .show(ctx, |ui| match self.current_tab {
                 Tab::Accounts => self.render_accounts_tab(ui),
+                Tab::WebLogin => self.render_web_login_tab(ui, frame),
                 Tab::Monitor => self.render_monitor_tab(ui),
                 Tab::Settings => self.render_settings_tab(ui),
             });
+    }
+
+    fn render_web_login_tab(&mut self, ui: &mut Ui, frame: &eframe::Frame) {
+        // 상단 제어 바
+        egui::Frame::none()
+            .fill(COLOR_BG_CARD)
+            .stroke(Stroke::new(1.0_f32, COLOR_BORDER))
+            .rounding(Rounding::same(8.0))
+            .inner_margin(12.0)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("저장 그룹:").size(13.0).strong().color(COLOR_TEXT_MUTED));
+                    ui.add(TextEdit::singleline(&mut self.web_login_group).desired_width(120.0));
+
+                    ui.add_space(10.0);
+
+                    if ui.button("공식 로그인 새로고침").clicked() {
+                        if let Some(ref wl) = self.embedded_web_login {
+                            wl.reload();
+                        }
+                    }
+
+                    if ui.button("세션 초기화 (로그아웃)").clicked() {
+                        if let Some(ref mut wl) = self.embedded_web_login {
+                            wl.clear_session();
+                        }
+                    }
+
+                    if ui.button("계정 목록으로 이동").clicked() {
+                        if let Some(ref wl) = self.embedded_web_login {
+                            wl.set_visible(false);
+                        }
+                        self.current_tab = Tab::Accounts;
+                    }
+
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let status_text = if let Some(ref wl) = self.embedded_web_login {
+                            wl.status.as_str()
+                        } else {
+                            "웹뷰 초기화 중..."
+                        };
+                        ui.label(RichText::new(status_text).size(12.0).color(COLOR_SKY_ACCENT));
+                    });
+                });
+            });
+
+        ui.add_space(8.0);
+
+        // 하단 내장 웹뷰 영역 할당
+        let rect = ui.available_rect_before_wrap();
+        ui.allocate_rect(rect, egui::Sense::hover());
+
+        if self.embedded_web_login.is_none() {
+            match EmbeddedWebLogin::new(
+                frame,
+                rect.min.x as f64,
+                rect.min.y as f64,
+                rect.width() as f64,
+                rect.height() as f64,
+            ) {
+                Ok(wl) => {
+                    self.embedded_web_login = Some(wl);
+                }
+                Err(e) => {
+                    ui.label(RichText::new(format!("내장 웹뷰 로드 실패: {}", e)).color(COLOR_DANGER));
+                }
+            }
+        } else if let Some(ref mut wl) = self.embedded_web_login {
+            wl.set_visible(true);
+            wl.set_bounds(
+                rect.min.x as f64,
+                rect.min.y as f64,
+                rect.width() as f64,
+                rect.height() as f64,
+            );
+
+            // 주기적 쿠키 감지
+            if let Some(cookie) = wl.poll_cookie() {
+                match RobloxAPI::validate_cookie(&cookie) {
+                    Ok(info) => {
+                        let thumb = RobloxAPI::get_user_thumbnail(info.id);
+                        let _ = self.store.upsert_account(
+                            info.id,
+                            &info.name,
+                            &info.display_name,
+                            &cookie,
+                            &self.web_login_group,
+                            thumb,
+                            None,
+                        );
+                        let _ = self.store.save();
+                        self.toast_msg = format!("'{}' (@{}) 계정이 성공적으로 등록되었습니다.", info.name, info.display_name);
+                        self.logs.push(format!("[웹 로그인 성공] {} 계정 등록 완료", info.name));
+                        wl.clear_session();
+                        wl.set_visible(false);
+                        self.current_tab = Tab::Accounts;
+                    }
+                    Err(e) => {
+                        self.logs.push(format!("[웹 로그인] 쿠키 검증 실패: {}", e));
+                    }
+                }
+            }
+        }
     }
 
     fn render_accounts_tab(&mut self, ui: &mut Ui) {
@@ -1761,7 +1884,7 @@ impl RobloxLauncherApp {
                             ui.add_space(14.0);
 
                             if !*use_cookie_mode {
-                                // 1. 공식 웹 브라우저 로그인 화면 모드
+                                // 1. 앱 내 공식 웹 로그인 화면 모드
                                 ui.horizontal(|ui| {
                                     ui.label(RichText::new("저장 그룹:").size(12.5).strong().color(COLOR_TEXT_MUTED));
                                     ui.add(TextEdit::singleline(group_input).desired_width(140.0));
@@ -1776,17 +1899,14 @@ impl RobloxLauncherApp {
                                     .show(ui, |ui| {
                                         ui.label(
                                             RichText::new(
-                                                "아래 버튼을 누르면 Roblox 공식 전용 로그인 창(독립 앱 모드)이 실행됩니다.\n\n\
-                                                창에서 아이디, 비밀번호 입력은 물론 2단계 인증(2FA), 보안 캡차 퍼즐까지 \
-                                                직접 완료하시면 보안 세션 쿠키를 자동으로 감지하여 계정을 등록하고 창이 닫힙니다."
+                                                "아래 버튼을 누르면 Two-Roblox 앱 내부의 공식 로블록스 웹 로그인 화면으로 바로 이동합니다.\n\n\
+                                                앱 안에서 아이디, 비밀번호 입력은 물론 2단계 인증(2FA), 보안 캡차 퍼즐까지 \
+                                                직접 완료하시면 보안 세션 쿠키를 자동으로 감지하여 계정을 등록하고 보관함에 영구 저장합니다."
                                             )
                                             .size(12.0)
                                             .color(Color32::from_rgb(203, 213, 225)),
                                         );
                                     });
-
-                                ui.add_space(10.0);
-                                ui.label(RichText::new(&*status_msg).size(12.0).color(COLOR_SKY_ACCENT));
 
                                 ui.add_space(16.0);
                                 ui.horizontal(|ui| {
@@ -1795,64 +1915,13 @@ impl RobloxLauncherApp {
                                     }
 
                                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                        let btn_text = if *is_loading { "로그인 창 실행 중..." } else { "공식 로그인 웹 창 열기" };
-                                        let add_btn = Self::ui_primary_btn(ui, btn_text, Vec2::new(160.0, 34.0));
-
-                                        if add_btn.clicked() && !*is_loading {
-                                            let grp = group_input.trim().to_string();
-                                            *is_loading = true;
-                                            *status_msg = "공식 로그인 창을 실행했습니다. 로그인 창에서 로그인을 완료하세요.".to_string();
-                                            let tx = self.event_tx.clone();
-
-                                            std::thread::spawn(move || {
-                                                let tx_clone = tx.clone();
-                                                match WebLoginManager::start_web_login_flow(move |status| {
-                                                    let _ = tx_clone.send(AppEvent::Log(format!("[웹 로그인] {}", status)));
-                                                    let _ = tx_clone.send(AppEvent::Toast(status.to_string()));
-                                                }) {
-                                                    Ok(Some(cookie)) => {
-                                                        match RobloxAPI::validate_cookie(&cookie) {
-                                                            Ok(info) => {
-                                                                let thumb = RobloxAPI::get_user_thumbnail(info.id);
-                                                                let mut store = AccountStore::new("accounts.enc");
-                                                                if store.try_auto_unlock() {
-                                                                    let _ = store.upsert_account(
-                                                                        info.id,
-                                                                        &info.name,
-                                                                        &info.display_name,
-                                                                        &cookie,
-                                                                        &grp,
-                                                                        thumb,
-                                                                        None,
-                                                                    );
-                                                                }
-                                                                let _ = tx.send(AppEvent::Log(format!(
-                                                                    "웹 로그인 성공: {} (@{}) 계정 등록 완료",
-                                                                    info.name, info.display_name
-                                                                )));
-                                                                let _ = tx.send(AppEvent::Toast(format!(
-                                                                    "{} 계정이 성공적으로 등록되었습니다.",
-                                                                    info.name
-                                                                )));
-                                                                let _ = tx.send(AppEvent::AccountsChanged);
-                                                            }
-                                                            Err(e) => {
-                                                                let _ = tx.send(AppEvent::Log(format!("계정 정보 검증 실패: {}", e)));
-                                                                let _ = tx.send(AppEvent::Toast(format!("계정 정보 조회 오류: {}", e)));
-                                                            }
-                                                        }
-                                                    }
-                                                    Ok(None) => {
-                                                        let _ = tx.send(AppEvent::Log("로그인 창이 닫혔거나 취소되었습니다.".to_string()));
-                                                        let _ = tx.send(AppEvent::Toast("로그인이 취소되었습니다.".to_string()));
-                                                    }
-                                                    Err(e) => {
-                                                        let _ = tx.send(AppEvent::Log(format!("웹 로그인 오류: {}", e)));
-                                                        let _ = tx.send(AppEvent::Toast(format!("브라우저 실행 오류: {}", e)));
-                                                    }
-                                                }
-                                            });
-
+                                        let add_btn = Self::ui_primary_btn(ui, "앱 내 웹 로그인 화면 열기", Vec2::new(180.0, 34.0));
+                                        if add_btn.clicked() {
+                                            self.web_login_group = group_input.trim().to_string();
+                                            if let Some(ref wl) = self.embedded_web_login {
+                                                wl.set_visible(true);
+                                            }
+                                            self.current_tab = Tab::WebLogin;
                                             close_modal = true;
                                         }
                                     });
