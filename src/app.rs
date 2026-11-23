@@ -61,10 +61,12 @@ pub enum AppEvent {
 
 enum Modal {
     AddAccount {
-        #[allow(dead_code)]
-        is_cookie_mode: bool,
+        use_cookie_mode: bool,
+        username_input: String,
+        password_input: String,
         group_input: String,
         cookie_input: String,
+        remember_password: bool,
         status_msg: String,
         is_loading: bool,
     },
@@ -370,14 +372,16 @@ impl RobloxLauncherApp {
                         self.toast_msg = format!("업데이트 실패: {}", msg);
                     }
                 }
-                AppEvent::AccountsChanged => {}
+                AppEvent::AccountsChanged => {
+                    let _ = self.store.reload();
+                }
                 AppEvent::InstancesRefreshed(list) => {
                     self.live_instances = list;
                 }
             }
         }
 
-        if self.last_poll.elapsed() >= Duration::from_millis(1500) {
+        if self.last_poll.elapsed() >= Duration::from_millis(1000) {
             self.last_poll = Instant::now();
             let instances = self.multi_mgr.get_active_instances_info();
             self.live_instances = instances;
@@ -426,6 +430,38 @@ impl RobloxLauncherApp {
         if accounts.is_empty() {
             self.toast_msg = "실행할 계정을 먼저 선택하세요.".to_string();
             return;
+        }
+
+        self.launch_accounts_pipeline(accounts, place_opt, job_opt, delay);
+    }
+
+    fn launch_all_idle_async(&mut self) {
+        let place_opt = self.parse_place_id(&self.place_input);
+        let job_opt = if self.config_store.config.last_job_id.trim().is_empty() {
+            None
+        } else {
+            Some(self.config_store.config.last_job_id.trim().to_string())
+        };
+
+        let delay = self.config_store.config.launch_delay;
+        let max_n = self.config_store.config.max_concurrent;
+
+        let accounts: Vec<Account> = self
+            .store
+            .accounts
+            .iter()
+            .filter(|a| !self.multi_mgr.is_account_running(a.user_id))
+            .take(max_n)
+            .cloned()
+            .collect();
+
+        if accounts.is_empty() {
+            self.toast_msg = "실행 대기 중인 계정이 없습니다.".to_string();
+            return;
+        }
+
+        for a in &accounts {
+            self.selected_ids.insert(a.user_id);
         }
 
         self.launch_accounts_pipeline(accounts, place_opt, job_opt, delay);
@@ -490,7 +526,37 @@ impl RobloxLauncherApp {
 
             for (idx, acc) in targets.iter().enumerate() {
                 let uname = &acc.username;
-                let ticket_res = RobloxAPI::get_auth_ticket(&acc.cookie);
+                let mut current_cookie = acc.cookie.clone();
+                let mut ticket_res = RobloxAPI::get_auth_ticket(&current_cookie);
+
+                // 세션 만료로 티켓 발급 실패 시, 저장된 비밀번호가 있다면 자동 재로그인 및 쿠키 갱신 시도
+                if ticket_res.is_err() {
+                    if let Some(ref pw) = acc.saved_password {
+                        let _ = tx.send(AppEvent::Log(format!(
+                            "[{}/{}] {} 세션 만료 감지: 저장된 비밀번호로 자동 재로그인 시도...",
+                            idx + 1,
+                            targets.len(),
+                            uname
+                        )));
+                        if let Ok(crate::roblox_api::LoginResult::Success { cookie: new_cookie, .. }) =
+                            RobloxAPI::login_with_credentials(uname, pw)
+                        {
+                            let _ = tx.send(AppEvent::Log(format!(
+                                "[{}/{}] {} 자동 재로그인 성공. 새 세션으로 자동 갱신합니다.",
+                                idx + 1,
+                                targets.len(),
+                                uname
+                            )));
+                            current_cookie = new_cookie.clone();
+                            let mut store = AccountStore::new("accounts.enc");
+                            if store.try_auto_unlock() {
+                                let _ = store.update_cookie(acc.user_id, &new_cookie);
+                            }
+                            ticket_res = RobloxAPI::get_auth_ticket(&current_cookie);
+                        }
+                    }
+                }
+
                 match ticket_res {
                     Ok(ticket) => {
                         match RobloxAPI::build_direct_cli_args(
@@ -533,7 +599,7 @@ impl RobloxLauncherApp {
                     }
                     Err(e) => {
                         let _ = tx.send(AppEvent::Log(format!(
-                            "[{}/{}] {} 인증 티켓 발급 실패: {}. 쿠키를 재등록하세요.",
+                            "[{}/{}] {} 인증 티켓 발급 실패: {}. 쿠키를 재등록하거나 비밀번호를 확인하세요.",
                             idx + 1,
                             targets.len(),
                             uname,
@@ -841,10 +907,13 @@ impl RobloxLauncherApp {
                         let add_btn = Self::ui_primary_btn(ui, "+ 계정 추가", Vec2::new(116.0, 34.0));
                         if add_btn.clicked() {
                             self.modal = Some(Modal::AddAccount {
-                                is_cookie_mode: true,
+                                use_cookie_mode: false,
+                                username_input: String::new(),
+                                password_input: String::new(),
                                 group_input: "기본".to_string(),
                                 cookie_input: String::new(),
-                                status_msg: "쿠키(.ROBLOSECURITY)를 입력하면 자동으로 사용자 정보와 아바타를 등록합니다.".to_string(),
+                                remember_password: true,
+                                status_msg: "아이디와 비밀번호로 로그인하면 보안 세션이 자동 발급됩니다.".to_string(),
                                 is_loading: false,
                             });
                         }
@@ -884,16 +953,29 @@ impl RobloxLauncherApp {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.add_space(16.0);
 
-                        let launch_btn = Self::ui_primary_btn(ui, "선택 계정 실행", Vec2::new(136.0, 38.0));
+                        let launch_btn = Self::ui_primary_btn(ui, "선택 계정 실행", Vec2::new(124.0, 38.0));
                         if launch_btn.clicked() {
                             self.launch_selected_async();
                         }
 
-                        ui.add_space(8.0);
+                        ui.add_space(6.0);
 
+                        let launch_all_btn = ui.add(
+                            Button::new(RichText::new("대기 계정 일괄 실행").color(COLOR_TEXT_WHITE).strong())
+                                .fill(Color32::from_rgb(16, 120, 70))
+                                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(22, 163, 74)))
+                                .min_size(Vec2::new(134.0, 38.0)),
+                        );
+                        if launch_all_btn.clicked() {
+                            self.launch_all_idle_async();
+                        }
+
+                        ui.add_space(6.0);
+
+                        let opt_text = format!("실행 옵션 ({}초)", self.config_store.config.launch_delay);
                         let opt_btn = ui.add(
-                            Button::new(RichText::new("실행 옵션").size(13.0))
-                                .min_size(Vec2::new(94.0, 38.0)),
+                            Button::new(RichText::new(opt_text).size(12.5))
+                                .min_size(Vec2::new(104.0, 38.0)),
                         );
                         if opt_btn.clicked() {
                             self.modal = Some(Modal::LaunchOptions {
@@ -905,10 +987,11 @@ impl RobloxLauncherApp {
 
                         // 나머지 공간 좌측: 선택 카운터 및 Place ID 입력창
                         ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                            let sel_text = format!("선택: {}개", self.selected_ids.len());
-                            ui.label(RichText::new(sel_text).size(13.5).strong().color(COLOR_SKY_ACCENT));
+                            let idle_cnt = self.store.accounts.iter().filter(|a| !self.multi_mgr.is_account_running(a.user_id)).count();
+                            let sel_text = format!("선택: {}개 (대기 {}개)", self.selected_ids.len(), idle_cnt);
+                            ui.label(RichText::new(sel_text).size(13.0).strong().color(COLOR_SKY_ACCENT));
 
-                            ui.add_space(14.0);
+                            ui.add_space(12.0);
 
                             let avail = (ui.available_width() - 16.0).max(120.0);
                             let place_edit = ui.add(
@@ -937,15 +1020,34 @@ impl RobloxLauncherApp {
     }
 
     fn render_accounts_tab(&mut self, ui: &mut Ui) {
-        // 상단 툴바: 검색, 그룹 필터, 전체선택, 선택해제, 쿠키검증, 삭제
+        let query = self.search_query.trim().to_lowercase();
+        let selected_grp = self.selected_group.clone();
+        let filtered: Vec<Account> = self
+            .store
+            .accounts
+            .iter()
+            .filter(|a| {
+                if selected_grp != "전체 그룹" && a.group != selected_grp {
+                    return false;
+                }
+                if !query.is_empty() {
+                    let blob = format!("{} {} {} {}", a.username, a.display_name, a.group, a.memo).to_lowercase();
+                    return blob.contains(&query);
+                }
+                true
+            })
+            .cloned()
+            .collect();
+
+        // 상단 툴바: 검색, 그룹 필터, 전체선택, 선택해제, 대기중선택, 실행중선택, 세션검증, 삭제
         ui.horizontal(|ui| {
             ui.add(
                 TextEdit::singleline(&mut self.search_query)
                     .hint_text("계정명, 닉네임, 그룹 검색...")
-                    .desired_width(260.0),
+                    .desired_width(220.0),
             );
 
-            ui.add_space(6.0);
+            ui.add_space(4.0);
 
             let mut groups = vec!["전체 그룹".to_string()];
             let mut unique_groups: Vec<String> = self
@@ -967,10 +1069,10 @@ impl RobloxLauncherApp {
                     }
                 });
 
-            ui.add_space(10.0);
+            ui.add_space(8.0);
 
             if ui.button("전체 선택").clicked() {
-                for a in &self.store.accounts {
+                for a in &filtered {
                     self.selected_ids.insert(a.user_id);
                 }
             }
@@ -979,11 +1081,29 @@ impl RobloxLauncherApp {
                 self.selected_ids.clear();
             }
 
-            if ui.button("쿠키 검증").clicked() {
+            if ui.button("대기 중 선택").clicked() {
+                self.selected_ids.clear();
+                for a in &filtered {
+                    if !self.multi_mgr.is_account_running(a.user_id) {
+                        self.selected_ids.insert(a.user_id);
+                    }
+                }
+            }
+
+            if ui.button("실행 중 선택").clicked() {
+                self.selected_ids.clear();
+                for a in &filtered {
+                    if self.multi_mgr.is_account_running(a.user_id) {
+                        self.selected_ids.insert(a.user_id);
+                    }
+                }
+            }
+
+            if ui.button("세션 검증").clicked() {
                 self.validate_cookies_async();
             }
 
-            let del_btn = Self::ui_danger_btn(ui, "삭제", Vec2::new(60.0, 32.0));
+            let del_btn = Self::ui_danger_btn(ui, "삭제", Vec2::new(56.0, 32.0));
             if del_btn.clicked() {
                 if !self.selected_ids.is_empty() {
                     self.modal = Some(Modal::ConfirmDelete);
@@ -1020,25 +1140,6 @@ impl RobloxLauncherApp {
             });
 
         ui.add_space(6.0);
-
-        let query = self.search_query.trim().to_lowercase();
-        let selected_grp = self.selected_group.clone();
-        let filtered: Vec<Account> = self
-            .store
-            .accounts
-            .iter()
-            .filter(|a| {
-                if selected_grp != "전체 그룹" && a.group != selected_grp {
-                    return false;
-                }
-                if !query.is_empty() {
-                    let blob = format!("{} {} {} {}", a.username, a.display_name, a.group, a.memo).to_lowercase();
-                    return blob.contains(&query);
-                }
-                true
-            })
-            .cloned()
-            .collect();
 
         let mut to_launch_single: Option<Account> = None;
         let mut to_terminate_uid: Option<u64> = None;
@@ -1105,14 +1206,30 @@ impl RobloxLauncherApp {
 
                                 ui.add_space(6.0);
 
-                                // 사용자명 및 닉네임
+                                // 사용자명 및 닉네임, 자동갱신 배지
                                 ui.vertical(|ui| {
-                                    ui.label(
-                                        RichText::new(&acc.username)
-                                            .size(13.5)
-                                            .strong()
-                                            .color(COLOR_TEXT_WHITE),
-                                    );
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            RichText::new(&acc.username)
+                                                .size(13.5)
+                                                .strong()
+                                                .color(COLOR_TEXT_WHITE),
+                                        );
+                                        if acc.saved_password.is_some() {
+                                            egui::Frame::none()
+                                                .fill(Color32::from_rgb(15, 35, 25))
+                                                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(34, 197, 94)))
+                                                .rounding(Rounding::same(4.0))
+                                                .inner_margin(Vec2::new(5.0, 1.5))
+                                                .show(ui, |ui| {
+                                                    ui.label(
+                                                        RichText::new("PW 자동갱신")
+                                                            .size(10.0)
+                                                            .color(Color32::from_rgb(74, 222, 128)),
+                                                    );
+                                                });
+                                        }
+                                    });
                                     ui.label(
                                         RichText::new(format!("@{}", acc.display_name))
                                             .size(11.5)
@@ -1189,49 +1306,97 @@ impl RobloxLauncherApp {
         let accounts = self.store.accounts.clone();
         let tx = self.event_tx.clone();
 
-        self.logs.push("전체 계정 쿠키 유효성 검사 시작...".to_string());
-        self.toast_msg = "쿠키 검사를 진행 중입니다...".to_string();
+        self.logs.push("전체 계정 세션 유효성 검사 시작...".to_string());
+        self.toast_msg = "세션 검사를 진행 중입니다...".to_string();
 
         std::thread::spawn(move || {
             let mut valid_cnt = 0;
+            let mut refreshed_cnt = 0;
             let mut invalid_cnt = 0;
 
             for acc in accounts {
                 match RobloxAPI::validate_cookie(&acc.cookie) {
                     Ok(_) => valid_cnt += 1,
                     Err(e) => {
-                        invalid_cnt += 1;
-                        let _ = tx.send(AppEvent::Log(format!("쿠키 만료 확인 ({}) : {}", acc.username, e)));
+                        let mut recovered = false;
+                        if let Some(ref pw) = acc.saved_password {
+                            if let Ok(crate::roblox_api::LoginResult::Success { cookie: new_cookie, .. }) =
+                                RobloxAPI::login_with_credentials(&acc.username, pw)
+                            {
+                                let mut store = AccountStore::new("accounts.enc");
+                                if store.try_auto_unlock() {
+                                    let _ = store.update_cookie(acc.user_id, &new_cookie);
+                                }
+                                refreshed_cnt += 1;
+                                recovered = true;
+                                let _ = tx.send(AppEvent::Log(format!(
+                                    "{} 계정 세션 자동 재발급 완료",
+                                    acc.username
+                                )));
+                            }
+                        }
+
+                        if !recovered {
+                            invalid_cnt += 1;
+                            let _ = tx.send(AppEvent::Log(format!("세션 만료 확인 ({}) : {}", acc.username, e)));
+                        }
                     }
                 }
-                std::thread::sleep(Duration::from_millis(350));
+                std::thread::sleep(Duration::from_millis(300));
             }
 
-            let msg = format!("쿠키 검사 완료: 유효 {}개 / 만료 {}개", valid_cnt, invalid_cnt);
+            let msg = format!(
+                "검사 완료: 유효 {}개 / 자동 갱신 {}개 / 만료 {}개",
+                valid_cnt, refreshed_cnt, invalid_cnt
+            );
             let _ = tx.send(AppEvent::Log(msg.clone()));
             let _ = tx.send(AppEvent::Toast(msg));
+            let _ = tx.send(AppEvent::AccountsChanged);
         });
     }
 
     fn render_monitor_tab(&mut self, ui: &mut Ui) {
+        let total_mem: u64 = self.live_instances.iter().map(|i| i.memory_mb).sum();
+        let running_cnt = self.live_instances.len();
+
         ui.horizontal(|ui| {
             ui.label(
-                RichText::new("현재 PC에서 실행 중인 모든 Roblox 클라이언트를 실시간 감시하고 제어합니다.")
-                    .size(13.0)
-                    .color(COLOR_TEXT_MUTED),
+                RichText::new(format!(
+                    "실행 중인 클라이언트: {}개  |  총 메모리: {} MB",
+                    running_cnt, total_mem
+                ))
+                .size(13.5)
+                .strong()
+                .color(COLOR_SKY_ACCENT),
             );
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if Self::ui_danger_btn(ui, "모든 Roblox 종료", Vec2::new(130.0, 32.0)).clicked() {
+                if Self::ui_danger_btn(ui, "모든 Roblox 종료", Vec2::new(120.0, 32.0)).clicked() {
                     self.multi_mgr.terminate_all();
                     self.toast_msg = "모든 Roblox 프로세스를 종료했습니다.".to_string();
                     self.logs.push("실행 중인 모든 Roblox 프로세스 일괄 종료".to_string());
                 }
 
-                if Self::ui_primary_btn(ui, "모든 창 바둑판 정렬", Vec2::new(140.0, 32.0)).clicked() {
+                ui.add_space(6.0);
+
+                if Self::ui_primary_btn(ui, "창 바둑판 정렬", Vec2::new(110.0, 32.0)).clicked() {
                     let cnt = MultiInstanceManager::tile_all_windows();
                     self.toast_msg = format!("Roblox 창 {}개를 화면에 바둑판 정렬했습니다.", cnt);
                     self.logs.push(format!("Roblox 창 {}개 바둑판 정렬 완료", cnt));
+                }
+
+                ui.add_space(6.0);
+
+                if ui.add(Button::new("모든 창 최소화").min_size(Vec2::new(96.0, 32.0))).clicked() {
+                    let cnt = MultiInstanceManager::minimize_all_windows();
+                    self.toast_msg = format!("Roblox 창 {}개를 최소화했습니다.", cnt);
+                }
+
+                ui.add_space(6.0);
+
+                if ui.add(Button::new("모든 창 복원").min_size(Vec2::new(88.0, 32.0))).clicked() {
+                    let cnt = MultiInstanceManager::restore_all_windows();
+                    self.toast_msg = format!("Roblox 창 {}개를 복원했습니다.", cnt);
                 }
             });
         });
@@ -1252,7 +1417,7 @@ impl RobloxLauncherApp {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.add_space(10.0);
                         ui.label(RichText::new("창 제어").size(12.0).strong().color(COLOR_TEXT_MUTED));
-                        ui.add_space(80.0);
+                        ui.add_space(110.0);
                         ui.label(RichText::new("메모리").size(12.0).strong().color(COLOR_TEXT_MUTED));
                         ui.add_space(40.0);
                         ui.label(RichText::new("PID").size(12.0).strong().color(COLOR_TEXT_MUTED));
@@ -1264,6 +1429,7 @@ impl RobloxLauncherApp {
 
         let mut to_kill_pid: Option<u32> = None;
         let mut to_focus_hwnd: Option<isize> = None;
+        let mut to_minimize_hwnd: Option<isize> = None;
 
         ScrollArea::vertical()
             .max_height(ui.available_height() - 20.0)
@@ -1302,12 +1468,16 @@ impl RobloxLauncherApp {
 
                                     ui.add_space(4.0);
                                     if let Some(hwnd) = inst.hwnd {
-                                        if ui.add(Button::new("창 활성화").min_size(Vec2::new(70.0, 28.0))).clicked() {
+                                        if ui.add(Button::new("최소화").min_size(Vec2::new(54.0, 28.0))).clicked() {
+                                            to_minimize_hwnd = Some(hwnd);
+                                        }
+                                        ui.add_space(2.0);
+                                        if ui.add(Button::new("창 활성화").min_size(Vec2::new(66.0, 28.0))).clicked() {
                                             to_focus_hwnd = Some(hwnd);
                                         }
                                     }
 
-                                    ui.add_space(20.0);
+                                    ui.add_space(16.0);
 
                                     ui.label(
                                         RichText::new(format!("{} MB", inst.memory_mb))
@@ -1315,7 +1485,7 @@ impl RobloxLauncherApp {
                                             .color(Color32::from_rgb(147, 197, 253)),
                                     );
 
-                                    ui.add_space(30.0);
+                                    ui.add_space(24.0);
 
                                     ui.label(
                                         RichText::new(format!("{}", inst.pid))
@@ -1332,6 +1502,10 @@ impl RobloxLauncherApp {
 
         if let Some(hwnd) = to_focus_hwnd {
             MultiInstanceManager::focus_window(hwnd as _);
+        }
+
+        if let Some(hwnd) = to_minimize_hwnd {
+            MultiInstanceManager::minimize_window(hwnd as _);
         }
 
         if let Some(pid) = to_kill_pid {
@@ -1462,16 +1636,19 @@ impl RobloxLauncherApp {
         if let Some(ref mut m) = self.modal {
             match m {
                 Modal::AddAccount {
-                    is_cookie_mode: _,
+                    use_cookie_mode,
+                    username_input,
+                    password_input,
                     group_input,
                     cookie_input,
+                    remember_password,
                     status_msg,
                     is_loading,
                 } => {
-                    Window::new("로블록스 계정 추가")
+                    Window::new("로블록스 계정 등록")
                         .collapsible(false)
                         .resizable(false)
-                        .fixed_size(Vec2::new(500.0, 360.0))
+                        .fixed_size(Vec2::new(520.0, 420.0))
                         .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
                         .frame(
                             egui::Frame::none()
@@ -1481,91 +1658,216 @@ impl RobloxLauncherApp {
                                 .inner_margin(20.0),
                         )
                         .show(ctx, |ui| {
+                            // 모드 전환 탭 버튼
                             ui.horizontal(|ui| {
-                                ui.label(RichText::new("저장 그룹:").size(13.0).strong().color(COLOR_TEXT_MUTED));
-                                ui.add(TextEdit::singleline(group_input).desired_width(140.0));
-                            });
-
-                            ui.add_space(10.0);
-                            ui.label(RichText::new(&*status_msg).size(12.0).color(COLOR_TEXT_MUTED));
-
-                            ui.add_space(10.0);
-                            ui.label(
-                                RichText::new("ROBLOSECURITY 쿠키 입력 (여러 줄 입력 시 일괄 등록 지원):")
-                                    .size(12.5)
-                                    .color(Color32::from_rgb(203, 213, 225)),
-                            );
-                            ui.add(
-                                TextEdit::multiline(cookie_input)
-                                    .hint_text("_|WARNING:-DO-NOT-SHARE-THIS.--Sharing-this-will-allow-someone-to-log-in-to-your-account...")
-                                    .desired_rows(6)
-                                    .desired_width(460.0),
-                            );
-
-                            ui.add_space(16.0);
-                            ui.horizontal(|ui| {
-                                if ui.button("닫기").clicked() {
-                                    close_modal = true;
+                                let btn_id_pw = ui.add(
+                                    Button::new(RichText::new("아이디 / 비밀번호 로그인").strong())
+                                        .fill(if !*use_cookie_mode { COLOR_PRIMARY } else { Color32::from_rgb(26, 30, 42) })
+                                        .min_size(Vec2::new(180.0, 32.0)),
+                                );
+                                if btn_id_pw.clicked() {
+                                    *use_cookie_mode = false;
                                 }
 
-                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                    let btn_text = if *is_loading { "추가 중..." } else { "계정 등록" };
-                                    let add_btn = Self::ui_primary_btn(ui, btn_text, Vec2::new(100.0, 34.0));
+                                ui.add_space(8.0);
 
-                                    if add_btn.clicked() && !*is_loading {
-                                        let raw_cookies = cookie_input.clone();
-                                        let grp = group_input.clone();
-                                        *is_loading = true;
+                                let btn_cookie = ui.add(
+                                    Button::new(RichText::new("쿠키(.ROBLOSECURITY) 등록").strong())
+                                        .fill(if *use_cookie_mode { COLOR_PRIMARY } else { Color32::from_rgb(26, 30, 42) })
+                                        .min_size(Vec2::new(180.0, 32.0)),
+                                );
+                                if btn_cookie.clicked() {
+                                    *use_cookie_mode = true;
+                                }
+                            });
 
-                                        let tx = self.event_tx.clone();
-                                        std::thread::spawn(move || {
-                                            let mut added_cnt = 0;
-                                            for line in raw_cookies.lines() {
-                                                let c = line.trim().trim_matches('"');
-                                                if c.is_empty() {
-                                                    continue;
-                                                }
-                                                let pure_cookie = if c.contains(".ROBLOSECURITY=") {
-                                                    c.split(".ROBLOSECURITY=").nth(1).unwrap_or(c).split(';').next().unwrap_or(c).trim()
-                                                } else {
-                                                    c
-                                                };
+                            ui.add_space(14.0);
 
-                                                match RobloxAPI::validate_cookie(pure_cookie) {
-                                                    Ok(info) => {
-                                                        let thumb = RobloxAPI::get_user_thumbnail(info.id);
-                                                        let _ = tx.send(AppEvent::Log(format!(
-                                                            "새 계정 검증 성공: {} (@{})",
-                                                            info.name, info.display_name
-                                                        )));
+                            if !*use_cookie_mode {
+                                // 1. 아이디 / 비밀번호 로그인 모드
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new("저장 그룹:").size(12.5).strong().color(COLOR_TEXT_MUTED));
+                                    ui.add(TextEdit::singleline(group_input).desired_width(140.0));
+                                });
 
-                                                        let mut store = AccountStore::new("accounts.enc");
-                                                        if store.try_auto_unlock() {
-                                                            let _ = store.upsert_account(
-                                                                info.id,
-                                                                &info.name,
-                                                                &info.display_name,
-                                                                pure_cookie,
-                                                                &grp,
-                                                                thumb,
-                                                            );
-                                                            added_cnt += 1;
-                                                        }
-                                                    }
-                                                    Err(e) => {
-                                                        let _ = tx.send(AppEvent::Log(format!("쿠키 검증 실패: {}", e)));
-                                                    }
-                                                }
-                                            }
+                                ui.add_space(10.0);
+                                ui.label(RichText::new("아이디 (사용자명 / 이메일 / 전화번호):").size(12.5).color(COLOR_TEXT_MUTED));
+                                ui.add(TextEdit::singleline(username_input).hint_text("RobloxUsername").desired_width(460.0));
 
-                                            let _ = tx.send(AppEvent::Toast(format!("총 {}개 계정이 등록되었습니다.", added_cnt)));
-                                            let _ = tx.send(AppEvent::AccountsChanged);
-                                        });
+                                ui.add_space(10.0);
+                                ui.label(RichText::new("비밀번호:").size(12.5).color(COLOR_TEXT_MUTED));
+                                ui.add(TextEdit::singleline(password_input).password(true).hint_text("비밀번호 입력").desired_width(460.0));
 
+                                ui.add_space(10.0);
+                                ui.checkbox(remember_password, "비밀번호 암호화 저장 (세션 만료/업데이트 시 무중단 자동 갱신)");
+
+                                ui.add_space(8.0);
+                                ui.label(RichText::new(&*status_msg).size(12.0).color(COLOR_TEXT_MUTED));
+
+                                ui.add_space(16.0);
+                                ui.horizontal(|ui| {
+                                    if ui.button("닫기").clicked() {
                                         close_modal = true;
                                     }
+
+                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                        let btn_text = if *is_loading { "로그인 진행 중..." } else { "로그인 및 계정 등록" };
+                                        let add_btn = Self::ui_primary_btn(ui, btn_text, Vec2::new(140.0, 34.0));
+
+                                        if add_btn.clicked() && !*is_loading {
+                                            let uname = username_input.trim().to_string();
+                                            let pw = password_input.clone();
+                                            let grp = group_input.trim().to_string();
+                                            let rem = *remember_password;
+
+                                            if uname.is_empty() || pw.is_empty() {
+                                                *status_msg = "아이디와 비밀번호를 모두 입력하세요.".to_string();
+                                            } else {
+                                                *is_loading = true;
+                                                let tx = self.event_tx.clone();
+
+                                                std::thread::spawn(move || {
+                                                    let _ = tx.send(AppEvent::Log(format!("{} 계정 공식 서버 로그인 시도...", uname)));
+                                                    match RobloxAPI::login_with_credentials(&uname, &pw) {
+                                                        Ok(crate::roblox_api::LoginResult::Success { cookie, user_info }) => {
+                                                            let thumb = RobloxAPI::get_user_thumbnail(user_info.id);
+                                                            let mut store = AccountStore::new("accounts.enc");
+                                                            if store.try_auto_unlock() {
+                                                                let saved_pw = if rem { Some(pw) } else { None };
+                                                                let _ = store.upsert_account(
+                                                                    user_info.id,
+                                                                    &user_info.name,
+                                                                    &user_info.display_name,
+                                                                    &cookie,
+                                                                    &grp,
+                                                                    thumb,
+                                                                    saved_pw,
+                                                                );
+                                                            }
+                                                            let _ = tx.send(AppEvent::Log(format!(
+                                                                "계정 로그인 등록 성공: {} (@{})",
+                                                                user_info.name, user_info.display_name
+                                                            )));
+                                                            let _ = tx.send(AppEvent::Toast(format!(
+                                                                "{} 계정 등록이 완료되었습니다.",
+                                                                user_info.name
+                                                            )));
+                                                            let _ = tx.send(AppEvent::AccountsChanged);
+                                                        }
+                                                        Ok(crate::roblox_api::LoginResult::ChallengeRequired { challenge_type, message }) => {
+                                                            let _ = tx.send(AppEvent::Log(format!(
+                                                                "로그인 보안 요구 ({}): {}. 쿠키 직접 등록을 이용하세요.",
+                                                                challenge_type, message
+                                                            )));
+                                                            let _ = tx.send(AppEvent::Toast(
+                                                                "2FA 또는 보안 캡차가 요구됩니다. 쿠키 등록 탭을 이용하세요.".to_string(),
+                                                            ));
+                                                        }
+                                                        Ok(crate::roblox_api::LoginResult::Failed { message }) => {
+                                                            let _ = tx.send(AppEvent::Log(format!("로그인 실패: {}", message)));
+                                                            let _ = tx.send(AppEvent::Toast(format!("로그인 실패: {}", message)));
+                                                        }
+                                                        Err(e) => {
+                                                            let _ = tx.send(AppEvent::Log(format!("로그인 통신 오류: {}", e)));
+                                                            let _ = tx.send(AppEvent::Toast(format!("로그인 오류: {}", e)));
+                                                        }
+                                                    }
+                                                });
+
+                                                close_modal = true;
+                                            }
+                                        }
+                                    });
                                 });
-                            });
+                            } else {
+                                // 2. 쿠키 직접 등록 모드
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new("저장 그룹:").size(12.5).strong().color(COLOR_TEXT_MUTED));
+                                    ui.add(TextEdit::singleline(group_input).desired_width(140.0));
+                                });
+
+                                ui.add_space(10.0);
+                                ui.label(RichText::new(&*status_msg).size(12.0).color(COLOR_TEXT_MUTED));
+
+                                ui.add_space(10.0);
+                                ui.label(
+                                    RichText::new("ROBLOSECURITY 쿠키 입력 (줄바꿈 구분으로 다중 계정 일괄 등록 지원):")
+                                        .size(12.5)
+                                        .color(Color32::from_rgb(203, 213, 225)),
+                                );
+                                ui.add(
+                                    TextEdit::multiline(cookie_input)
+                                        .hint_text("_|WARNING:-DO-NOT-SHARE-THIS.--Sharing-this-will-allow-someone-to-log-in-to-your-account...")
+                                        .desired_rows(6)
+                                        .desired_width(460.0),
+                                );
+
+                                ui.add_space(16.0);
+                                ui.horizontal(|ui| {
+                                    if ui.button("닫기").clicked() {
+                                        close_modal = true;
+                                    }
+
+                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                        let btn_text = if *is_loading { "추가 중..." } else { "쿠키로 일괄 등록" };
+                                        let add_btn = Self::ui_primary_btn(ui, btn_text, Vec2::new(130.0, 34.0));
+
+                                        if add_btn.clicked() && !*is_loading {
+                                            let raw_cookies = cookie_input.clone();
+                                            let grp = group_input.clone();
+                                            *is_loading = true;
+
+                                            let tx = self.event_tx.clone();
+                                            std::thread::spawn(move || {
+                                                let mut added_cnt = 0;
+                                                for line in raw_cookies.lines() {
+                                                    let c = line.trim().trim_matches('"');
+                                                    if c.is_empty() {
+                                                        continue;
+                                                    }
+                                                    let pure_cookie = if c.contains(".ROBLOSECURITY=") {
+                                                        c.split(".ROBLOSECURITY=").nth(1).unwrap_or(c).split(';').next().unwrap_or(c).trim()
+                                                    } else {
+                                                        c
+                                                    };
+
+                                                    match RobloxAPI::validate_cookie(pure_cookie) {
+                                                        Ok(info) => {
+                                                            let thumb = RobloxAPI::get_user_thumbnail(info.id);
+                                                            let _ = tx.send(AppEvent::Log(format!(
+                                                                "새 계정 검증 성공: {} (@{})",
+                                                                info.name, info.display_name
+                                                            )));
+
+                                                            let mut store = AccountStore::new("accounts.enc");
+                                                            if store.try_auto_unlock() {
+                                                                let _ = store.upsert_account(
+                                                                    info.id,
+                                                                    &info.name,
+                                                                    &info.display_name,
+                                                                    pure_cookie,
+                                                                    &grp,
+                                                                    thumb,
+                                                                    None,
+                                                                );
+                                                                added_cnt += 1;
+                                                            }
+                                                        }
+                                                        Err(e) => {
+                                                            let _ = tx.send(AppEvent::Log(format!("쿠키 검증 실패: {}", e)));
+                                                        }
+                                                    }
+                                                }
+
+                                                let _ = tx.send(AppEvent::Toast(format!("총 {}개 계정이 등록되었습니다.", added_cnt)));
+                                                let _ = tx.send(AppEvent::AccountsChanged);
+                                            });
+
+                                            close_modal = true;
+                                        }
+                                    });
+                                });
+                            }
                         });
                 }
                 Modal::LaunchOptions {

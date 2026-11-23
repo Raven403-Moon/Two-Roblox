@@ -27,6 +27,8 @@ pub struct Account {
     pub avatar_url: Option<String>,
     pub added_at: String,
     pub updated_at: String,
+    #[serde(default)]
+    pub saved_password: Option<String>,
 }
 
 pub struct AccountStore {
@@ -194,6 +196,35 @@ impl AccountStore {
         }
     }
 
+    pub fn reload(&mut self) -> Result<()> {
+        if let Some(key) = self.current_key {
+            let raw = fs::read(&self.filepath)?;
+            if raw.len() >= SALT_LEN + NONCE_LEN {
+                let nonce = &raw[SALT_LEN..SALT_LEN + NONCE_LEN];
+                let ciphertext = &raw[SALT_LEN + NONCE_LEN..];
+                let cipher = Aes256Gcm::new_from_slice(&key)
+                    .map_err(|e| anyhow!("AES-256-GCM 초기화 실패: {:?}", e))?;
+                let decrypted = cipher
+                    .decrypt(Nonce::from_slice(nonce), ciphertext)
+                    .map_err(|_| anyhow!("계정 보관함 복호화 실패"))?;
+                self.accounts = serde_json::from_slice(&decrypted)
+                    .map_err(|e| anyhow!("계정 JSON 파싱 실패: {:?}", e))?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn update_cookie(&mut self, user_id: u64, new_cookie: &str) -> Result<()> {
+        for acc in &mut self.accounts {
+            if acc.user_id == user_id {
+                acc.cookie = new_cookie.to_string();
+                acc.updated_at = chrono_now_str();
+                return self.save();
+            }
+        }
+        Ok(())
+    }
+
     pub fn upsert_account(
         &mut self,
         user_id: u64,
@@ -202,6 +233,7 @@ impl AccountStore {
         cookie: &str,
         group: &str,
         avatar_url: Option<String>,
+        saved_password: Option<String>,
     ) -> Result<()> {
         let now = chrono_now_str();
 
@@ -215,6 +247,9 @@ impl AccountStore {
                 }
                 if avatar_url.is_some() {
                     acc.avatar_url = avatar_url;
+                }
+                if saved_password.is_some() {
+                    acc.saved_password = saved_password;
                 }
                 acc.updated_at = now;
                 return self.save();
@@ -231,6 +266,7 @@ impl AccountStore {
             avatar_url,
             added_at: now.clone(),
             updated_at: now,
+            saved_password,
         });
 
         self.save()

@@ -18,7 +18,7 @@ use windows_sys::Win32::System::Threading::{
 use windows_sys::Win32::UI::Shell::{IsUserAnAdmin, ShellExecuteW};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetWindowThreadProcessId, IsWindowVisible, MoveWindow, SetForegroundWindow,
-    SetWindowTextW, ShowWindow, SystemParametersInfoW, SPI_GETWORKAREA, SW_RESTORE,
+    SetWindowTextW, ShowWindow, SystemParametersInfoW, SPI_GETWORKAREA, SW_MINIMIZE, SW_RESTORE,
     SW_SHOWNORMAL,
 };
 
@@ -340,6 +340,43 @@ impl MultiInstanceManager {
                 SetForegroundWindow(hwnd);
             }
         }
+    }
+
+    #[allow(dead_code)]
+    pub fn minimize_window(hwnd: HWND) {
+        if !hwnd.is_null() {
+            unsafe {
+                ShowWindow(hwnd, SW_MINIMIZE);
+            }
+        }
+    }
+
+    pub fn minimize_all_windows() -> usize {
+        let pids = Self::get_running_roblox_pids();
+        let mut count = 0;
+        for pid in pids {
+            if let Some(h) = Self::find_hwnd_by_pid(pid) {
+                unsafe {
+                    ShowWindow(h, SW_MINIMIZE);
+                }
+                count += 1;
+            }
+        }
+        count
+    }
+
+    pub fn restore_all_windows() -> usize {
+        let pids = Self::get_running_roblox_pids();
+        let mut count = 0;
+        for pid in pids {
+            if let Some(h) = Self::find_hwnd_by_pid(pid) {
+                unsafe {
+                    ShowWindow(h, SW_RESTORE);
+                }
+                count += 1;
+            }
+        }
+        count
     }
 
     pub fn tile_all_windows() -> usize {
