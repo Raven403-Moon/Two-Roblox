@@ -12,6 +12,7 @@ use crate::crypto_store::{Account, AccountStore, ConfigStore};
 use crate::multi_instance::{is_admin, restart_as_admin, InstanceInfo, MultiInstanceManager};
 use crate::roblox_api::RobloxAPI;
 use crate::updater::RobloxUpdater;
+use crate::web_login::WebLoginManager;
 
 // 테마 색상 팔레트 (Python 현대적 Black, White, Blue 테마와 100% 일치)
 const COLOR_BG_MAIN: Color32 = Color32::from_rgb(9, 10, 13);
@@ -59,14 +60,17 @@ pub enum AppEvent {
     InstancesRefreshed(Vec<InstanceInfo>),
 }
 
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum LaunchMode {
+    SelectedAccounts, // 선택 계정 실행
+    AllIdleAccounts,  // 대기 계정 일괄 실행
+}
+
 enum Modal {
     AddAccount {
         use_cookie_mode: bool,
-        username_input: String,
-        password_input: String,
         group_input: String,
         cookie_input: String,
-        remember_password: bool,
         status_msg: String,
         is_loading: bool,
     },
@@ -105,6 +109,9 @@ pub struct RobloxLauncherApp {
     live_version: String,
     exe_path: Option<String>,
     is_updating_now: bool,
+
+    launch_mode: LaunchMode,
+    launch_menu_open: bool,
 
     modal: Option<Modal>,
 
@@ -171,6 +178,8 @@ impl RobloxLauncherApp {
             live_version: String::new(),
             exe_path: None,
             is_updating_now: false,
+            launch_mode: LaunchMode::SelectedAccounts,
+            launch_menu_open: false,
             modal: None,
             event_tx: tx,
             event_rx: rx,
@@ -908,12 +917,9 @@ impl RobloxLauncherApp {
                         if add_btn.clicked() {
                             self.modal = Some(Modal::AddAccount {
                                 use_cookie_mode: false,
-                                username_input: String::new(),
-                                password_input: String::new(),
                                 group_input: "기본".to_string(),
                                 cookie_input: String::new(),
-                                remember_password: true,
-                                status_msg: "아이디와 비밀번호로 로그인하면 보안 세션이 자동 발급됩니다.".to_string(),
+                                status_msg: "공식 웹 로그인 창에서 아이디, 비번, 2FA, 캡차를 완료하시면 자동으로 계정이 등록됩니다.".to_string(),
                                 is_loading: false,
                             });
                         }
@@ -939,51 +945,71 @@ impl RobloxLauncherApp {
 
     fn render_bottom_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::bottom("bottom_bar")
-            .exact_height(64.0)
+            .exact_height(54.0)
             .frame(
                 egui::Frame::none()
                     .fill(COLOR_BG_SIDEBAR)
                     .stroke(Stroke::new(1.0_f32, COLOR_BORDER)),
             )
             .show(ctx, |ui| {
+                let mut toggle_dropdown = false;
+                let mut arrow_rect = egui::Rect::NOTHING;
+
                 ui.horizontal_centered(|ui| {
                     ui.add_space(16.0);
 
-                    // 우측 고정 버튼 먼저 배치
+                    // 우측 고정 버튼 먼저 배치 (스플릿 버튼: [선택 계정 실행] + [^])
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.add_space(16.0);
 
-                        let launch_btn = Self::ui_primary_btn(ui, "선택 계정 실행", Vec2::new(124.0, 38.0));
-                        if launch_btn.clicked() {
-                            self.launch_selected_async();
-                        }
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing = Vec2::new(1.0, 0.0);
 
-                        ui.add_space(6.0);
+                            let (btn_text, btn_fill, stroke_color) = match self.launch_mode {
+                                LaunchMode::SelectedAccounts => (
+                                    "선택 계정 실행",
+                                    COLOR_PRIMARY,
+                                    COLOR_PRIMARY_HOVER,
+                                ),
+                                LaunchMode::AllIdleAccounts => (
+                                    "대기 계정 일괄 실행",
+                                    Color32::from_rgb(16, 120, 70),
+                                    Color32::from_rgb(22, 163, 74),
+                                ),
+                            };
 
-                        let launch_all_btn = ui.add(
-                            Button::new(RichText::new("대기 계정 일괄 실행").color(COLOR_TEXT_WHITE).strong())
-                                .fill(Color32::from_rgb(16, 120, 70))
-                                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(22, 163, 74)))
-                                .min_size(Vec2::new(134.0, 38.0)),
-                        );
-                        if launch_all_btn.clicked() {
-                            self.launch_all_idle_async();
-                        }
+                            // 모드 변경 화살표 토글 버튼: ^
+                            let arrow_btn = ui.add(
+                                Button::new(RichText::new("^").color(COLOR_TEXT_WHITE).strong().size(13.0))
+                                    .fill(if self.launch_menu_open {
+                                        Color32::from_rgb(45, 55, 75)
+                                    } else {
+                                        btn_fill
+                                    })
+                                    .stroke(Stroke::new(1.0_f32, stroke_color))
+                                    .rounding(Rounding { nw: 0.0, sw: 0.0, ne: 6.0, se: 6.0 })
+                                    .min_size(Vec2::new(26.0, 32.0)),
+                            );
+                            arrow_rect = arrow_btn.rect;
+                            if arrow_btn.clicked() {
+                                toggle_dropdown = true;
+                            }
 
-                        ui.add_space(6.0);
-
-                        let opt_text = format!("실행 옵션 ({}초)", self.config_store.config.launch_delay);
-                        let opt_btn = ui.add(
-                            Button::new(RichText::new(opt_text).size(12.5))
-                                .min_size(Vec2::new(104.0, 38.0)),
-                        );
-                        if opt_btn.clicked() {
-                            self.modal = Some(Modal::LaunchOptions {
-                                job_id: self.config_store.config.last_job_id.clone(),
-                                delay: self.config_store.config.launch_delay,
-                                max_n: self.config_store.config.max_concurrent,
-                            });
-                        }
+                            // 주 실행 버튼
+                            let main_btn = ui.add(
+                                Button::new(RichText::new(btn_text).color(COLOR_TEXT_WHITE).strong().size(13.0))
+                                    .fill(btn_fill)
+                                    .stroke(Stroke::new(1.0_f32, stroke_color))
+                                    .rounding(Rounding { nw: 6.0, sw: 6.0, ne: 0.0, se: 0.0 })
+                                    .min_size(Vec2::new(124.0, 32.0)),
+                            );
+                            if main_btn.clicked() {
+                                match self.launch_mode {
+                                    LaunchMode::SelectedAccounts => self.launch_selected_async(),
+                                    LaunchMode::AllIdleAccounts => self.launch_all_idle_async(),
+                                }
+                            }
+                        });
 
                         // 나머지 공간 좌측: 선택 카운터 및 Place ID 입력창
                         ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
@@ -1006,6 +1032,60 @@ impl RobloxLauncherApp {
                         });
                     });
                 });
+
+                if toggle_dropdown {
+                    self.launch_menu_open = !self.launch_menu_open;
+                }
+
+                // 드롭다운 팝업 메뉴 (화살표 버튼 바로 위에 표시)
+                if self.launch_menu_open {
+                    let mut close_menu = false;
+                    let menu_pos = egui::pos2((arrow_rect.right() - 210.0).max(10.0), (arrow_rect.top() - 120.0).max(10.0));
+
+                    egui::Area::new(egui::Id::new("launch_menu_area"))
+                        .fixed_pos(menu_pos)
+                        .order(egui::Order::Foreground)
+                        .show(ctx, |ui| {
+                            egui::Frame::none()
+                                .fill(COLOR_BG_CARD)
+                                .stroke(Stroke::new(1.0_f32, COLOR_BORDER_LIGHT))
+                                .rounding(Rounding::same(8.0))
+                                .inner_margin(8.0)
+                                .show(ui, |ui| {
+                                    ui.set_width(200.0);
+                                    ui.label(RichText::new("실행 모드 전환").size(11.0).color(COLOR_TEXT_MUTED));
+                                    ui.add_space(4.0);
+
+                                    let is_sel = self.launch_mode == LaunchMode::SelectedAccounts;
+                                    if ui.selectable_label(is_sel, "선택 계정 실행 (기본)").clicked() {
+                                        self.launch_mode = LaunchMode::SelectedAccounts;
+                                        close_menu = true;
+                                    }
+
+                                    let is_idle = self.launch_mode == LaunchMode::AllIdleAccounts;
+                                    if ui.selectable_label(is_idle, "대기 계정 일괄 실행").clicked() {
+                                        self.launch_mode = LaunchMode::AllIdleAccounts;
+                                        close_menu = true;
+                                    }
+
+                                    ui.separator();
+
+                                    let opt_txt = format!("실행 옵션 설정 ({}초)...", self.config_store.config.launch_delay);
+                                    if ui.button(RichText::new(opt_txt).size(12.0)).clicked() {
+                                        self.modal = Some(Modal::LaunchOptions {
+                                            job_id: self.config_store.config.last_job_id.clone(),
+                                            delay: self.config_store.config.launch_delay,
+                                            max_n: self.config_store.config.max_concurrent,
+                                        });
+                                        close_menu = true;
+                                    }
+                                });
+                        });
+
+                    if close_menu {
+                        self.launch_menu_open = false;
+                    }
+                }
             });
     }
 
@@ -1637,18 +1717,15 @@ impl RobloxLauncherApp {
             match m {
                 Modal::AddAccount {
                     use_cookie_mode,
-                    username_input,
-                    password_input,
                     group_input,
                     cookie_input,
-                    remember_password,
                     status_msg,
                     is_loading,
                 } => {
                     Window::new("로블록스 계정 등록")
                         .collapsible(false)
                         .resizable(false)
-                        .fixed_size(Vec2::new(520.0, 420.0))
+                        .fixed_size(Vec2::new(520.0, 360.0))
                         .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
                         .frame(
                             egui::Frame::none()
@@ -1660,12 +1737,12 @@ impl RobloxLauncherApp {
                         .show(ctx, |ui| {
                             // 모드 전환 탭 버튼
                             ui.horizontal(|ui| {
-                                let btn_id_pw = ui.add(
-                                    Button::new(RichText::new("아이디 / 비밀번호 로그인").strong())
+                                let btn_web = ui.add(
+                                    Button::new(RichText::new("공식 웹 화면 로그인 (2FA/캡차 지원)").strong())
                                         .fill(if !*use_cookie_mode { COLOR_PRIMARY } else { Color32::from_rgb(26, 30, 42) })
-                                        .min_size(Vec2::new(180.0, 32.0)),
+                                        .min_size(Vec2::new(210.0, 32.0)),
                                 );
-                                if btn_id_pw.clicked() {
+                                if btn_web.clicked() {
                                     *use_cookie_mode = false;
                                 }
 
@@ -1684,25 +1761,32 @@ impl RobloxLauncherApp {
                             ui.add_space(14.0);
 
                             if !*use_cookie_mode {
-                                // 1. 아이디 / 비밀번호 로그인 모드
+                                // 1. 공식 웹 브라우저 로그인 화면 모드
                                 ui.horizontal(|ui| {
                                     ui.label(RichText::new("저장 그룹:").size(12.5).strong().color(COLOR_TEXT_MUTED));
                                     ui.add(TextEdit::singleline(group_input).desired_width(140.0));
                                 });
 
-                                ui.add_space(10.0);
-                                ui.label(RichText::new("아이디 (사용자명 / 이메일 / 전화번호):").size(12.5).color(COLOR_TEXT_MUTED));
-                                ui.add(TextEdit::singleline(username_input).hint_text("RobloxUsername").desired_width(460.0));
+                                ui.add_space(12.0);
+                                egui::Frame::none()
+                                    .fill(Color32::from_rgb(15, 18, 25))
+                                    .stroke(Stroke::new(1.0_f32, COLOR_BORDER))
+                                    .rounding(Rounding::same(8.0))
+                                    .inner_margin(14.0)
+                                    .show(ui, |ui| {
+                                        ui.label(
+                                            RichText::new(
+                                                "아래 버튼을 누르면 Roblox 공식 전용 로그인 창(독립 앱 모드)이 실행됩니다.\n\n\
+                                                창에서 아이디, 비밀번호 입력은 물론 2단계 인증(2FA), 보안 캡차 퍼즐까지 \
+                                                직접 완료하시면 보안 세션 쿠키를 자동으로 감지하여 계정을 등록하고 창이 닫힙니다."
+                                            )
+                                            .size(12.0)
+                                            .color(Color32::from_rgb(203, 213, 225)),
+                                        );
+                                    });
 
                                 ui.add_space(10.0);
-                                ui.label(RichText::new("비밀번호:").size(12.5).color(COLOR_TEXT_MUTED));
-                                ui.add(TextEdit::singleline(password_input).password(true).hint_text("비밀번호 입력").desired_width(460.0));
-
-                                ui.add_space(10.0);
-                                ui.checkbox(remember_password, "비밀번호 암호화 저장 (세션 만료/업데이트 시 무중단 자동 갱신)");
-
-                                ui.add_space(8.0);
-                                ui.label(RichText::new(&*status_msg).size(12.0).color(COLOR_TEXT_MUTED));
+                                ui.label(RichText::new(&*status_msg).size(12.0).color(COLOR_SKY_ACCENT));
 
                                 ui.add_space(16.0);
                                 ui.horizontal(|ui| {
@@ -1711,71 +1795,65 @@ impl RobloxLauncherApp {
                                     }
 
                                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                        let btn_text = if *is_loading { "로그인 진행 중..." } else { "로그인 및 계정 등록" };
-                                        let add_btn = Self::ui_primary_btn(ui, btn_text, Vec2::new(140.0, 34.0));
+                                        let btn_text = if *is_loading { "로그인 창 실행 중..." } else { "공식 로그인 웹 창 열기" };
+                                        let add_btn = Self::ui_primary_btn(ui, btn_text, Vec2::new(160.0, 34.0));
 
                                         if add_btn.clicked() && !*is_loading {
-                                            let uname = username_input.trim().to_string();
-                                            let pw = password_input.clone();
                                             let grp = group_input.trim().to_string();
-                                            let rem = *remember_password;
+                                            *is_loading = true;
+                                            *status_msg = "공식 로그인 창을 실행했습니다. 로그인 창에서 로그인을 완료하세요.".to_string();
+                                            let tx = self.event_tx.clone();
 
-                                            if uname.is_empty() || pw.is_empty() {
-                                                *status_msg = "아이디와 비밀번호를 모두 입력하세요.".to_string();
-                                            } else {
-                                                *is_loading = true;
-                                                let tx = self.event_tx.clone();
-
-                                                std::thread::spawn(move || {
-                                                    let _ = tx.send(AppEvent::Log(format!("{} 계정 공식 서버 로그인 시도...", uname)));
-                                                    match RobloxAPI::login_with_credentials(&uname, &pw) {
-                                                        Ok(crate::roblox_api::LoginResult::Success { cookie, user_info }) => {
-                                                            let thumb = RobloxAPI::get_user_thumbnail(user_info.id);
-                                                            let mut store = AccountStore::new("accounts.enc");
-                                                            if store.try_auto_unlock() {
-                                                                let saved_pw = if rem { Some(pw) } else { None };
-                                                                let _ = store.upsert_account(
-                                                                    user_info.id,
-                                                                    &user_info.name,
-                                                                    &user_info.display_name,
-                                                                    &cookie,
-                                                                    &grp,
-                                                                    thumb,
-                                                                    saved_pw,
-                                                                );
+                                            std::thread::spawn(move || {
+                                                let tx_clone = tx.clone();
+                                                match WebLoginManager::start_web_login_flow(move |status| {
+                                                    let _ = tx_clone.send(AppEvent::Log(format!("[웹 로그인] {}", status)));
+                                                    let _ = tx_clone.send(AppEvent::Toast(status.to_string()));
+                                                }) {
+                                                    Ok(Some(cookie)) => {
+                                                        match RobloxAPI::validate_cookie(&cookie) {
+                                                            Ok(info) => {
+                                                                let thumb = RobloxAPI::get_user_thumbnail(info.id);
+                                                                let mut store = AccountStore::new("accounts.enc");
+                                                                if store.try_auto_unlock() {
+                                                                    let _ = store.upsert_account(
+                                                                        info.id,
+                                                                        &info.name,
+                                                                        &info.display_name,
+                                                                        &cookie,
+                                                                        &grp,
+                                                                        thumb,
+                                                                        None,
+                                                                    );
+                                                                }
+                                                                let _ = tx.send(AppEvent::Log(format!(
+                                                                    "웹 로그인 성공: {} (@{}) 계정 등록 완료",
+                                                                    info.name, info.display_name
+                                                                )));
+                                                                let _ = tx.send(AppEvent::Toast(format!(
+                                                                    "{} 계정이 성공적으로 등록되었습니다.",
+                                                                    info.name
+                                                                )));
+                                                                let _ = tx.send(AppEvent::AccountsChanged);
                                                             }
-                                                            let _ = tx.send(AppEvent::Log(format!(
-                                                                "계정 로그인 등록 성공: {} (@{})",
-                                                                user_info.name, user_info.display_name
-                                                            )));
-                                                            let _ = tx.send(AppEvent::Toast(format!(
-                                                                "{} 계정 등록이 완료되었습니다.",
-                                                                user_info.name
-                                                            )));
-                                                            let _ = tx.send(AppEvent::AccountsChanged);
-                                                        }
-                                                        Ok(crate::roblox_api::LoginResult::ChallengeRequired { challenge_type, message }) => {
-                                                            let _ = tx.send(AppEvent::Log(format!(
-                                                                "로그인 보안 요구 ({}): {}. 쿠키 직접 등록을 이용하세요.",
-                                                                challenge_type, message
-                                                            )));
-                                                            let _ = tx.send(AppEvent::Toast(
-                                                                "2FA 또는 보안 캡차가 요구됩니다. 쿠키 등록 탭을 이용하세요.".to_string(),
-                                                            ));
-                                                        }
-                                                        Ok(crate::roblox_api::LoginResult::Failed { message }) => {
-                                                            let _ = tx.send(AppEvent::Log(format!("로그인 실패: {}", message)));
-                                                            let _ = tx.send(AppEvent::Toast(format!("로그인 실패: {}", message)));
-                                                        }
-                                                        Err(e) => {
-                                                            let _ = tx.send(AppEvent::Log(format!("로그인 통신 오류: {}", e)));
-                                                            let _ = tx.send(AppEvent::Toast(format!("로그인 오류: {}", e)));
+                                                            Err(e) => {
+                                                                let _ = tx.send(AppEvent::Log(format!("계정 정보 검증 실패: {}", e)));
+                                                                let _ = tx.send(AppEvent::Toast(format!("계정 정보 조회 오류: {}", e)));
+                                                            }
                                                         }
                                                     }
-                                                });
+                                                    Ok(None) => {
+                                                        let _ = tx.send(AppEvent::Log("로그인 창이 닫혔거나 취소되었습니다.".to_string()));
+                                                        let _ = tx.send(AppEvent::Toast("로그인이 취소되었습니다.".to_string()));
+                                                    }
+                                                    Err(e) => {
+                                                        let _ = tx.send(AppEvent::Log(format!("웹 로그인 오류: {}", e)));
+                                                        let _ = tx.send(AppEvent::Toast(format!("브라우저 실행 오류: {}", e)));
+                                                    }
+                                                }
+                                            });
 
-                                                close_modal = true;
-                                            }
+                                            close_modal = true;
                                         }
                                     });
                                 });

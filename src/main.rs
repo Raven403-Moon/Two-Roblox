@@ -5,6 +5,7 @@ mod crypto_store;
 mod multi_instance;
 mod roblox_api;
 mod updater;
+mod web_login;
 mod win_dpapi;
 
 use anyhow::Result;

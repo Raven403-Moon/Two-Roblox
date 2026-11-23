@@ -1,6 +1,6 @@
 ; Two-Roblox Inno Setup Script
 #define MyAppName "Two-Roblox"
-#define MyAppVersion "0.1.0"
+#define MyAppVersion "1.1.0"
 #define MyAppPublisher "Two-Roblox Team"
 #define MyAppExeName "Two-Roblox.exe"
 
