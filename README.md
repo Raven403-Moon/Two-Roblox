@@ -2,7 +2,7 @@
 
 Two-Roblox는 윈도우 환경에서 여러 개의 Roblox 클라이언트를 계정 충돌 없이 동시에 실행하고, 다수의 계정을 강력하게 암호화하여 관리할 수 있는 고성능 네이티브 Rust 런처입니다.
 
-기존 Python 기반 프로토타입에서 발생할 수 있는 런타임 오버헤드, 종속성 문제, 64비트 정수 오버플로우 문제를 완전히 해결하기 위해 메모리 안전성과 고성능을 보장하는 순수 Rust 언어로 전면 재설계되었습니다.
+기존 Python 기반 프로토타입에서 발생할 수 있는 런타임 오버헤드, 종속성 문제, 64비트 정수 오버플로우 문제를 완전히 해결하기 위해 메모리 안전성과 초고속 반응성을 보장하는 순수 Rust 언어로 전면 재설계되었습니다.
 
 ---
 
@@ -11,36 +11,45 @@ Two-Roblox는 윈도우 환경에서 여러 개의 Roblox 클라이언트를 계
 기존 로블록스 클라이언트는 단일 인스턴스 정책(`ROBLOX_singletonEvent`, `ROBLOX_singletonMutex`)으로 인해 하나의 PC에서 하나의 창만 실행할 수 있도록 제한되어 있습니다.
 
 Two-Roblox Rust 코어는 다음 목표를 완벽하게 달성합니다:
-1. 커널 레벨 싱글톤 선점 및 프로세스 격리로 무제한 다중 클라이언트 동시 실행
-2. 쿠키뿐만 아니라 아이디/비밀번호를 통한 공식 인증 연동 지원
-3. 공식 서버 라이브 빌드 실시간 비교 및 격리된 환경에서의 무중단 자동 업데이트 / 로그인 세션 유지
-4. Windows DPAPI 연동 자동 언락 및 PBKDF2 48만 회 + AES-256-GCM 군사급 계정 보관함
-5. 컴파일 타임 메모리 안전성 및 화이트리스트 기반 인젝션 공격 원천 차단
+1. Win32 커널 레벨 싱글톤 선점 및 프로세스 핸들 격리로 무제한 다중 클라이언트 동시 실행
+2. 외부 브라우저 없이 앱 내부에서 직접 동작하는 Microsoft WebView2 내장 공식 웹 로그인 (2FA 및 Arkose Labs 캡차 완벽 대응)
+3. 세션 쿠키(.ROBLOSECURITY) 자동 감지, 유효성 검증 및 로컬 암호화 보관함 연동
+4. 공식 서버 라이브 빌드 실시간 비교 및 격리된 환경에서의 무중단 자동 업데이트 / 로그인 세션 유지
+5. Windows DPAPI 연동 자동 언락 및 PBKDF2 48만 회 + AES-256-GCM 군사급 계정 보관함
+6. 현대적 다크 테마 GUI (eframe/egui) 및 한국어 폰트(맑은 고딕) 기본 내장
+7. 컴팩트 스플릿 드롭다운 런처 버튼 및 실시간 프로세스 모니터링
+8. Inno Setup 인스톨러, UPX 초경량 포터블 바이너리, 소스코드 아카이브, GPG 서명 및 SHA-256 자동 빌드
 
 ---
 
 ## 2. 주요 핵심 기능
 
-1. 다중 클라이언트 무제한 동시 실행
+### 1) 다중 클라이언트 무제한 동시 실행
 - 커널 레벨에서 싱글톤 이벤트 및 뮤텍스 핸들을 선점/해제하여 외부 부트스트래퍼 없이 다중 실행 환경을 조성합니다.
 - 이미 켜져 있는 기존 Roblox 프로세스가 있더라도 창을 닫지 않고 해당 프로세스의 싱글톤 핸들만 선택적으로 해제(격리)하여 추가 실행이 가능합니다.
 
-2. 유연한 계정 로그인 지원 (아이디/비밀번호 및 쿠키 등록)
-- 아이디와 비밀번호로 Roblox auth API(`v2/login`)에 직접 로그인할 수 있으며, 2단계 인증(2FA)이나 캡차가 요구되는 계정은 보안 안내 및 쿠키 등록 방식을 지원합니다.
-- 복수의 `.ROBLOSECURITY` 쿠키를 즉시 검증하고 그룹별로 분류하여 저장할 수 있습니다.
+### 2) 앱 내 공식 웹 로그인 (WebView2 기반 2FA / 캡차 완벽 대응)
+- 외부 브라우저 창을 띄우지 않고, 앱 내부의 전용 화면에서 Microsoft WebView2 엔진을 통해 공식 Roblox 로그인 화면(`https://www.roblox.com/login`)을 직접 렌더링합니다.
+- 사용자는 앱 화면 안에서 아이디, 비밀번호 입력뿐만 아니라 2단계 인증(2FA 이메일/OTP), Arkose Labs 캡차 퍼즐까지 정상적으로 완료할 수 있습니다.
+- 로그인이 성공하면 백그라운드 폴링을 통해 보안 세션 쿠키(`.ROBLOSECURITY`)를 자동 추출하고 암호화 보관함에 영구 등록한 뒤 즉시 계정 목록 화면으로 복귀합니다.
+- 다중 계정을 위해 기존 쿠키 등록 방식(줄바꿈을 통한 대량 일괄 등록)도 동일하게 지원합니다.
 
-3. 로블록스 무중단 자동 업데이트 및 세션 유지
-- 공식 API(`clientsettings.roblox.com`)를 통해 로컬 클라이언트 버전과 라이브 버전을 실시간 비교합니다.
-- 업데이트가 필요할 경우 싱글톤 락을 일시 해제한 뒤 격리된 안전 임시 디렉터리에서 공식 인스톨러를 무중단 실행합니다.
-- 설치 완료 즉시 최신 실행 파일 경로를 갱신하고, 새로운 단회성 인증 티켓(`rbx-authentication-ticket`)을 발급받아 최신 클라이언트에 주입하므로 로그인 세션 풀림이나 충돌 없이 게임/홈 화면에 바로 접속됩니다.
+### 3) 컴팩트 스플릿 드롭다운 런처 버튼
+- 하단 런처 바에 자리 잡은 단일 스플릿 버튼(`[선택 계정 실행]` + `[^]`)을 통해 UI 공간을 효율적으로 사용합니다.
+- 화살표(^) 버튼을 클릭하면 팝업 메뉴를 통해 '선택 계정 실행', '대기 계정 일괄 실행', '실행 간격(초) 설정'을 언제든지 손쉽게 전환할 수 있습니다.
 
-4. 엔터프라이즈급 보안 계정 보관함
-- 계정 데이터베이스는 마스터 비밀번호 기반의 PBKDF2-HMAC-SHA256 (480,000회 반복) 키 도출 및 AES-256-GCM으로 강력하게 암호화되어 저장됩니다.
-- Windows DPAPI(`CryptProtectData`)와 연동하여 "비밀번호 기억" 활성화 시 프로그램 실행 시마다 매번 암호를 묻지 않고 안전하게 자동 언락됩니다.
+### 4) 로블록스 무중단 자동 업데이트 및 세션 유지
+- 공식 배포 API(`clientsettings.roblox.com`)를 통해 로컬 클라이언트 버전과 라이브 버전을 실시간 비교합니다.
+- 새 버전이 감지되면 상단 헤더에 업데이트 알림 배너가 표시되며, 원클릭으로 격리된 1회용 임시 디렉터리에서 공식 인스톨러를 다운로드 및 무중단 설치합니다.
+- 설치 완료 즉시 최신 실행 파일 경로를 자동으로 갱신하고, 새로운 단회성 인증 티켓(`rbx-authentication-ticket`)을 발급받아 최신 클라이언트에 주입하므로 로그인 세션 풀림 없이 게임/홈 화면에 바로 접속됩니다.
 
-5. 실시간 프로세스 감시 및 윈도우 창 제어
-- 실행 중인 모든 Roblox 프로세스(외부 실행 프로세스 포함)의 PID를 실시간 열거합니다.
-- 실행 중인 모든 창을 모니터 작업 영역에 균등 분할 배치하는 "바둑판 자동 정렬" 및 "원클릭 전체 종료" 기능을 지원합니다.
+### 5) 엔터프라이즈급 보안 계정 보관함 (Vault)
+- 계정 데이터베이스는 마스터 비밀번호 기반의 PBKDF2-HMAC-SHA256 (480,000회 반복) 키 도출 및 AES-256-GCM으로 강력하게 암호화되어 로컬 파일(`accounts.enc`)에 저장됩니다.
+- Windows DPAPI(`CryptProtectData`)와 연동하여 "이 PC에서 마스터 비밀번호 기억" 활성화 시, 프로그램 재실행 시마다 매번 암호를 묻지 않고 운영체제 보안 수준에서 안전하게 자동 언락됩니다.
+
+### 6) 실시간 프로세스 감시 및 윈도우 창 제어
+- 실행 중인 모든 Roblox 프로세스(외부 실행 프로세스 포함)의 PID 및 메모리 사용량(MB)을 실시간 모니터링합니다.
+- 실행 중인 모든 창을 모니터 작업 영역에 균등 분할 배치하는 "바둑판 자동 정렬" 및 "원클릭 개별/전체 종료" 기능을 지원합니다.
 
 ---
 
@@ -73,8 +82,8 @@ Python 코드베이스 감사 및 Rust 재코딩 과정에서 발견된 취약�
 ### 사전 요구 사항
 - 운영체제: Windows 10 / Windows 11 (64-bit)
 - Rust 툴체인: Rust 1.75 이상 및 Cargo
-- (선택) UPX: `tools/upx.exe` 내장 또는 `winget install UPX.UPX`
-- (선택) Inno Setup: `winget install JRSoftware.InnoSetup`
+- (선택) UPX: `tools/upx.exe` 또는 winget 패키지 (`winget install UPX.UPX`)
+- (선택) Inno Setup 6: `winget install JRSoftware.InnoSetup`
 - (선택) GPG: Gpg4win / GnuPG (`gpg.exe`)
 
 ---
@@ -117,9 +126,9 @@ powershell -ExecutionPolicy Bypass -File .\build.ps1 -Clean -All
 
 | 파일명 | 종류 | 설명 |
 |---|---|---|
-| `Two-Roblox.exe` | 실행 바이너리 | 순수 Rust 릴리즈 최적화 실행 파일 (약 3.6MB) |
-| `Two-Roblox-Portable.exe` | 포터블 바이너리 | UPX LZMA 초고압축 독립 실행 파일 (약 1.3MB) |
-| `Two-Roblox-Setup-v0.1.0.exe` | 설치 프로그램 | 시작 메뉴/바탕화면 바로가기 및 언인스톨러가 포함된 인스톨러 (약 3.5MB) |
+| `Two-Roblox.exe` | 실행 바이너리 | 순수 Rust 릴리즈 최적화 실행 파일 |
+| `Two-Roblox-Portable.exe` | 포터블 바이너리 | UPX LZMA 초고압축 독립 실행 파일 (설치 불필요) |
+| `Two-Roblox-Setup-v1.1.0.exe` | 설치 프로그램 | 시작 메뉴/바탕화면 바로가기 및 언인스톨러가 포함된 인스톨러 |
 | `Two-Roblox-v0.1.0-source.zip` | 소스코드 아카이브 | 빌드 캐시 및 개인 데이터가 배제된 순수 배포용 소스코드 압축 파일 |
 | `SHA256SUMS.txt` | 무결성 체크섬 | 생성된 모든 배포 파일의 SHA-256 해시 목록 |
 | `*.asc` (선택) | GPG 분리 서명 | GPG 개인키로 전자 서명된 무결성 인증 파일 |
@@ -188,7 +197,58 @@ impl MultiInstanceManager {
 
 ---
 
-### 2) 단회성 인증 티켓 발급 및 직접 실행 CLI 파라미터 빌드 (`src/roblox_api.rs`)
+### 2) 앱 내 공식 로그인 화면 및 세션 쿠키 자동 추출 (`src/web_login.rs`)
+앱 윈도우 내부에 자식 윈도우로 WebView2를 호스팅하고, 로그인 완료 시 세션 쿠키를 즉시 가로채어 보관함에 영구 저장합니다.
+
+```rust
+use wry::{Rect, WebView, WebViewBuilder};
+use wry::raw_window_handle::HasWindowHandle;
+
+pub struct EmbeddedWebLogin {
+    pub webview: WebView,
+    pub status: String,
+    pub last_cookie: Option<String>,
+}
+
+impl EmbeddedWebLogin {
+    pub fn new<W: HasWindowHandle>(window: &W, x: f64, y: f64, w: f64, h: f64) -> Result<Self, anyhow::Error> {
+        let bounds = Rect {
+            position: wry::dpi::Position::Logical(wry::dpi::LogicalPosition::new(x, y)),
+            size: wry::dpi::Size::Logical(wry::dpi::LogicalSize::new(w, h)),
+        };
+
+        let webview = WebViewBuilder::new()
+            .with_url("https://www.roblox.com/login")
+            .with_bounds(bounds)
+            .build_as_child(window)?;
+
+        Ok(Self {
+            webview,
+            status: "공식 로그인 화면에서 로그인해 주세요.".to_string(),
+            last_cookie: None,
+        })
+    }
+
+    pub fn poll_cookie(&mut self) -> Option<String> {
+        if let Ok(cookies) = self.webview.cookies() {
+            for c in cookies {
+                if c.name() == ".ROBLOSECURITY" {
+                    let val = c.value().trim().to_string();
+                    if !val.is_empty() && self.last_cookie.as_deref() != Some(&val) {
+                        self.last_cookie = Some(val.clone());
+                        return Some(val);
+                    }
+                }
+            }
+        }
+        None
+    }
+}
+```
+
+---
+
+### 3) 단회성 인증 티켓 발급 및 직접 실행 CLI 파라미터 빌드 (`src/roblox_api.rs`)
 영구 쿠키 대신 수 초 내에 만료되는 일회용 인증 티켓을 발급받아 CLI 인자로 주입하며, 입력값에 대한 화이트리스트 검증을 수행합니다.
 
 ```rust
@@ -244,7 +304,7 @@ pub fn build_direct_cli_args(
 
 ---
 
-### 3) Windows DPAPI를 이용한 안전한 키 보호 (`src/win_dpapi.rs`)
+### 4) Windows DPAPI를 이용한 안전한 키 보호 (`src/win_dpapi.rs`)
 Windows 운영체제의 데이터 보호 API를 FFI로 호출하여 현재 로그인된 Windows 계정에서만 복호화 가능한 안전한 키 캐싱을 구현했습니다.
 
 ```rust
@@ -283,7 +343,7 @@ pub fn dpapi_protect(data: &[u8]) -> Result<Vec<u8>, anyhow::Error> {
 
 ---
 
-### 4) PBKDF2 48만 회 + AES-256-GCM 계정 보관함 (`src/crypto_store.rs`)
+### 5) PBKDF2 48만 회 + AES-256-GCM 계정 보관함 (`src/crypto_store.rs`)
 계정 정보를 JSON으로 직렬화한 후 난수 Nonce와 함께 AES-256-GCM으로 암호화하여 저장합니다.
 
 ```rust
@@ -316,37 +376,6 @@ pub fn encrypt_accounts(accounts: &[Account], key: &[u8; 32], salt: &[u8]) -> Re
 
 ---
 
-### 5) 격리된 임시 폴더 기반 무중단 인스톨러 실행 (`src/updater.rs`)
-공식 인스톨러 다운로드 시 심볼릭 링크 및 파일 치환 공격을 차단하기 위해 무작위 격리 임시 폴더를 사용합니다.
-
-```rust
-pub fn run_official_update() -> Result<String, anyhow::Error> {
-    // 1회용 격리 임시 디렉터리 생성
-    let tmp_dir = tempfile::tempdir()?;
-    let installer_path = tmp_dir.path().join("RobloxPlayerInstaller.exe");
-
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(45))
-        .build()?;
-
-    let mut resp = client.get("https://www.roblox.com/download/client?os=win").send()?;
-    let mut file = std::fs::File::create(&installer_path)?;
-    std::io::copy(&mut resp, &mut file)?;
-    drop(file);
-
-    // 공식 인스톨러 실행 (완료 후 임시 디렉터리는 drop 시 안전하게 자동 삭제)
-    let _ = std::process::Command::new(&installer_path).status()?;
-
-    let live_ver = Self::get_live_version().ok();
-    let (_, new_exe) = Self::find_local_player_exe(live_ver.as_deref())
-        .ok_or_else(|| anyhow::anyhow!("설치 후 최신 실행 파일을 찾을 수 없습니다."))?;
-
-    Ok(new_exe)
-}
-```
-
----
-
 ## 6. 프로젝트 디렉터리 구조
 
 ```
@@ -361,7 +390,9 @@ Two-Roblox/
 ├── CHANGELOG.txt               # 작업 내역 문서
 │
 ├── src/                        # Rust 소스 코드
-│   ├── main.rs                 # CLI 인터랙티브 대화형 런처 및 메인 루프
+│   ├── main.rs                 # Win32 애플리케이션 진입점 및 뷰포트 초기화
+│   ├── app.rs                  # eframe/egui GUI 메인 인터페이스 (탭, 모달, 런처 바)
+│   ├── web_login.rs            # WebView2 기반 인앱 공식 로블록스 웹 로그인 및 쿠키 추출
 │   ├── roblox_api.rs           # 공식 API 통신, 인증 티켓 발급, CLI 인자 빌더
 │   ├── multi_instance.rs       # Win32 커널 싱글톤 선점, 핸들 격리, 창 제어
 │   ├── updater.rs              # 버전 감지 및 격리 임시 폴더 기반 자동 업데이트
@@ -381,5 +412,6 @@ Two-Roblox/
     ├── Two-Roblox-Portable.exe # UPX 초경량 포터블 바이너리
     ├── Two-Roblox-Setup-v*.exe # Inno Setup 설치 프로그램
     ├── Two-Roblox-*-source.zip # 배포용 소스코드 아카이브
-    └── SHA256SUMS.txt          # 무결성 해시 목록
+    ├── SHA256SUMS.txt          # 무결성 해시 목록
+    └── *.asc                   # GPG 분리 서명 파일
 ```
