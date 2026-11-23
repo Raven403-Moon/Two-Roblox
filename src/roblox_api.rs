@@ -18,6 +18,7 @@ pub struct UserAuthenticatedResponse {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum LoginResult {
     Success {
         cookie: String,
@@ -100,6 +101,7 @@ impl RobloxAPI {
         None
     }
 
+    #[allow(dead_code)]
     pub fn login_with_credentials(username: &str, password: &str) -> Result<LoginResult> {
         let client = Self::create_client()?;
         let login_url = "https://auth.roblox.com/v2/login";

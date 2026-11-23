@@ -53,6 +53,7 @@ fn str_to_wide(s: &str) -> Vec<u16> {
 #[derive(Debug, Clone)]
 pub struct InstanceInfo {
     pub pid: u32,
+    #[allow(dead_code)]
     pub user_id: Option<u64>,
     pub username: String,
     pub memory_mb: u64,

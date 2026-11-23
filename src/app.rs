@@ -35,11 +35,13 @@ pub enum AppEvent {
         new_exe: Option<String>,
     },
     AccountsChanged,
+    #[allow(dead_code)]
     InstancesRefreshed(Vec<InstanceInfo>),
 }
 
 enum Modal {
     AddAccount {
+        #[allow(dead_code)]
         is_cookie_mode: bool,
         group_input: String,
         cookie_input: String,
