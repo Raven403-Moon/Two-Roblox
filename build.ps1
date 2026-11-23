@@ -267,7 +267,8 @@ if (-not (Test-Path $ReleaseExe)) {
 $DistStandardExe = Join-Path $DistDir "Two-Roblox.exe"
 Copy-Item $ReleaseExe -Destination $DistStandardExe -Force
 $OrigSize = (Get-Item $DistStandardExe).Length
-Write-Info "기본 실행 파일 배포 준비 완료: dist\Two-Roblox.exe ($([math]::Round($OrigSize / 1MB, 2)) MB)"
+$OrigSizeMb = [math]::Round($OrigSize / 1MB, 2)
+Write-Info "기본 실행 파일 배포 준비 완료: dist\Two-Roblox.exe (${OrigSizeMb} MB)"
 
 $GeneratedArtifacts = @($DistStandardExe)
 
@@ -281,9 +282,10 @@ if ($Upx -and $UpxPath) {
     & $UpxPath --best --lzma $DistPortableExe
     if ($LASTEXITCODE -eq 0) {
         $PackedSize = (Get-Item $DistPortableExe).Length
+        $PackedSizeMb = [math]::Round($PackedSize / 1MB, 2)
         $Ratio = [math]::Round(($PackedSize / $OrigSize) * 100, 2)
         Write-Info "UPX 포터블 압축 완료: dist\Two-Roblox-Portable.exe"
-        Write-Info "압축 크기: $([math]::Round($PackedSize / 1MB, 2)) MB (기존 대비 ${Ratio}%)"
+        Write-Info "압축 크기: ${PackedSizeMb} MB (기존 대비 ${Ratio}%)"
         Write-Info "포터블 버전은 별도의 설치 과정 없이 바로 실행 가능한 독립형 GUI 바이너리입니다."
         $GeneratedArtifacts += $DistPortableExe
     } else {
@@ -301,7 +303,8 @@ if ($Setup -and $IsccPath) {
         if ($LASTEXITCODE -eq 0) {
             $SetupExe = Join-Path $DistDir "Two-Roblox-Setup-v$Version.exe"
             if (Test-Path $SetupExe) {
-                Write-Info "설치 프로그램 생성 완료: dist\Two-Roblox-Setup-v$Version.exe ($([math]::Round((Get-Item $SetupExe).Length / 1MB, 2)) MB)"
+                $SetupSizeMb = [math]::Round((Get-Item $SetupExe).Length / 1MB, 2)
+                Write-Info "설치 프로그램 생성 완료: dist\Two-Roblox-Setup-v$Version.exe (${SetupSizeMb} MB)"
                 $GeneratedArtifacts += $SetupExe
             }
         } else {
@@ -348,7 +351,8 @@ if ($SourceZip) {
     Remove-Item -Path $TempSourceFolder -Recurse -Force
 
     if (Test-Path $SourceZipPath) {
-        Write-Info "소스코드 Zip 아카이브 생성 완료: dist\Two-Roblox-v$Version-source.zip ($([math]::Round((Get-Item $SourceZipPath).Length / 1KB, 2)) KB)"
+        $ZipSizeKb = [math]::Round((Get-Item $SourceZipPath).Length / 1KB, 2)
+        Write-Info "소스코드 Zip 아카이브 생성 완료: dist\Two-Roblox-v$Version-source.zip (${ZipSizeKb} KB)"
         $GeneratedArtifacts += $SourceZipPath
     }
 }
