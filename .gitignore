@@ -1,0 +1,22 @@
+# Rust build outputs
+/target/
+
+# Distribution packages & binaries
+/dist/
+
+# Security & credentials (NEVER commit vault or keys)
+.vault_key
+*.enc
+*.enc.bak
+config.json
+
+# Python virtual environment & cache
+venv/
+__pycache__/
+*.pyc
+
+# OS & Editor files
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
