@@ -10,6 +10,11 @@
 *.enc.bak
 config.json
 
+# WebView2 & Runtime Cache
+EBWebView/
+*.WebView2/
+*.log
+
 # Python virtual environment & cache
 venv/
 __pycache__/
